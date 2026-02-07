@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package gamepb.friendpb;
+
+// ============ 好友农场摘要信息 ============
+message Plant {
+    int64 dry_time_sec = 1;      // 缺水倒计时秒
+    int64 weed_time_sec = 2;     // 长草倒计时秒
+    int64 insect_time_sec = 3;   // 生虫倒计时秒
+    int64 ripe_time_sec = 4;     // 成熟倒计时秒
+    int64 ripe_fruit_id = 5;     // 成熟果实ID
+    int64 steal_plant_num = 6;   // 可偷数量
+    int64 dry_num = 7;           // 缺水地块数
+    int64 weed_num = 8;          // 有草地块数
+    int64 insect_num = 9;        // 有虫地块数
+}
+
+// ============ 标签 ============
+message Tags {
+    bool is_new = 1;
+    bool is_follow = 2;
+}
+
+// ============ 好友信息 ============
+message GameFriend {
+    int64 gid = 1;
+    string open_id = 2;
+    string name = 3;
+    string avatar_url = 4;
+    string remark = 5;
+    int64 level = 6;
+    int64 gold = 7;
+    Tags tags = 8;
+    Plant plant = 9;
+    int32 authorized_status = 10;
+    // field 11 reserved
+    // Illustrated illustrated = 12;  // 略
+    // repeated AvatarFrame equip_avatar_frames = 13;  // 略
+}
+
+// ============ 请求/回复 ============
+
+// --- 获取所有好友 ---
+message GetAllRequest {}
+
+message GetAllReply {
+    repeated GameFriend game_friends = 1;
+    // repeated Invitation invitations = 2;  // 略
+    int64 application_count = 3;
+}
+
+// --- 同步好友 (带 open_ids) ---
+message SyncAllRequest {
+    // field 1 reserved
+    repeated string open_ids = 2;
+}
+
+message SyncAllReply {
+    repeated GameFriend game_friends = 1;
+    // repeated Invitation invitations = 2;  // 略
+    int64 application_count = 3;
+}
