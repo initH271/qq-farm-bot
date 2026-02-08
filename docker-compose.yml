@@ -2,6 +2,7 @@ services:
   farm-bot:
     build: .
     container_name: qq-farm-bot
+    network_mode: host
     restart: unless-stopped
     env_file: .env
     environment:
