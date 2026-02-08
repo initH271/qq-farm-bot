@@ -42,7 +42,7 @@ function encodeMsg(serviceName, methodName, bodyBytes) {
 }
 
 function sendMsg(serviceName, methodName, bodyBytes, callback) {
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
+    if (!ws || ws.readyState !== 1) {
         log('WS', '连接未打开');
         return false;
     }
@@ -222,7 +222,15 @@ function connect(code, onLoginSuccess) {
     });
 
     ws.on('message', (data) => {
-        handleMessage(Buffer.isBuffer(data) ? data : Buffer.from(data));
+        let buf;
+        if (Buffer.isBuffer(data)) {
+            buf = data;
+        } else if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+            buf = Buffer.from(data);
+        } else {
+            buf = Buffer.from(data);
+        }
+        handleMessage(buf);
     });
 
     ws.on('close', (code, reason) => {

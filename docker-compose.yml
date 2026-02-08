@@ -1,0 +1,8 @@
+services:
+  farm-bot:
+    build: .
+    container_name: qq-farm-bot
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
+    command: ["--code", "${FARM_CODE}", "--interval", "${FARM_INTERVAL:-30}", "--friend-interval", "${FRIEND_INTERVAL:-60}"]
