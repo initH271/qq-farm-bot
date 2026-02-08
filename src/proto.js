@@ -4,7 +4,7 @@
 
 const protobuf = require('protobufjs');
 const path = require('path');
-const { log } = require('./utils');
+const { now } = require('./utils');
 
 // Proto 根对象与所有消息类型
 let root = null;
@@ -68,7 +68,7 @@ async function loadProto() {
     types.VisitLeaveRequest = root.lookupType('gamepb.visitpb.LeaveRequest');
     types.VisitLeaveReply = root.lookupType('gamepb.visitpb.LeaveReply');
 
-    log('Proto', '所有协议定义加载成功');
+    console.log(`[${now()}] [Proto] 所有协议定义加载成功`);
 }
 
 function getRoot() {

@@ -3,6 +3,6 @@ services:
     build: .
     container_name: qq-farm-bot
     restart: unless-stopped
+    env_file: .env
     environment:
       - TZ=Asia/Shanghai
-    command: ["--code", "${FARM_CODE}", "--interval", "${FARM_INTERVAL:-30}", "--friend-interval", "${FRIEND_INTERVAL:-60}"]
