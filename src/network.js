@@ -14,9 +14,11 @@ const { toLong, toNum } = require('./utils');
  * @param {Object} deps.logger   - { log, logWarn, setPrefix }
  */
 function createNetwork(deps) {
-    const { timeSync, logger } = deps;
+    const { timeSync, logger, onEvent } = deps;
     const { syncServerTime } = timeSync;
     const { log, logWarn } = logger;
+
+    function emit(event) { if (onEvent) try { onEvent(event); } catch(e) {} }
 
     // ============ 每用户私有状态 ============
     let ws = null;
@@ -54,6 +56,7 @@ function createNetwork(deps) {
     function sendMsg(serviceName, methodName, bodyBytes, callback) {
         if (!ws || ws.readyState !== 1) {
             log('WS', '连接未打开');
+            emit({ type: 'send_failed' });
             return false;
         }
         const seq = clientSeq;
@@ -68,6 +71,7 @@ function createNetwork(deps) {
             const seq = clientSeq;
             const timer = setTimeout(() => {
                 pendingCallbacks.delete(seq);
+                emit({ type: 'timeout', method: methodName });
                 reject(new Error(`请求超时: ${methodName}`));
             }, timeout);
 
@@ -130,6 +134,7 @@ function createNetwork(deps) {
             const type = event.message_type || '';
             if (type.includes('Kickout')) {
                 log('推送', `被踢下线! ${type}`);
+                emit({ type: 'kickout' });
             }
         } catch (e) { }
     }
@@ -170,6 +175,7 @@ function createNetwork(deps) {
                     logger.setPrefix(userState.name);
 
                     log('登录', `成功 | GID: ${userState.gid} | 昵称: ${userState.name} | 等级: ${userState.level} | 金币: ${userState.gold}`);
+                    emit({ type: 'login_success', userState: { ...userState } });
                     if (reply.time_now_millis) {
                         syncServerTime(toNum(reply.time_now_millis));
                         log('登录', `服务器时间: ${new Date(toNum(reply.time_now_millis)).toLocaleString()}`);
@@ -237,11 +243,13 @@ function createNetwork(deps) {
 
         ws.on('close', (code, reason) => {
             log('WS', `连接关闭 (code=${code})`);
+            emit({ type: 'ws_close', closeCode: code });
             cleanup();
         });
 
         ws.on('error', (err) => {
             logWarn('WS', `错误: ${err.message}`);
+            emit({ type: 'ws_error', message: err.message });
         });
     }
 

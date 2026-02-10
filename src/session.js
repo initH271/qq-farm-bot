@@ -11,13 +11,14 @@ const { createFriend } = require('./friend');
  * 创建一个完整的用户会话
  * @param {string} code - 登录凭证
  * @param {string} [label] - 日志标识（可选，默认用 code 前8位）
+ * @param {Function} [onEvent] - 网络事件回调（可选）
  */
-function createSession(code, label) {
+function createSession(code, label, onEvent) {
     const prefix = label || code.substring(0, 8);
 
     const timeSync = createTimeSync();
     const logger = createLogger(prefix);
-    const network = createNetwork({ timeSync, logger });
+    const network = createNetwork({ timeSync, logger, onEvent });
     const farm = createFarm({ network, timeSync, logger });
     const friend = createFriend({ network, timeSync, logger, farm });
 
