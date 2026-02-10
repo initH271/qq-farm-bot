@@ -6,6 +6,8 @@ const { createTimeSync, createLogger } = require('./utils');
 const { createNetwork } = require('./network');
 const { createFarm } = require('./farm');
 const { createFriend } = require('./friend');
+const { createTask } = require('./task');
+const { createWarehouse } = require('./warehouse');
 
 /**
  * 创建一个完整的用户会话
@@ -18,9 +20,21 @@ function createSession(code, label, onEvent) {
 
     const timeSync = createTimeSync();
     const logger = createLogger(prefix);
-    const network = createNetwork({ timeSync, logger, onEvent });
+
+    // 包装 onEvent，拦截 task_notify 事件转发给 task 模块
+    let task = null;
+    function wrappedOnEvent(event) {
+        if (event.type === 'task_notify' && task) {
+            task.onTaskNotify(event.taskInfo);
+        }
+        if (onEvent) onEvent(event);
+    }
+
+    const network = createNetwork({ timeSync, logger, onEvent: wrappedOnEvent });
     const farm = createFarm({ network, timeSync, logger });
     const friend = createFriend({ network, timeSync, logger, farm });
+    task = createTask({ network, logger });
+    const warehouse = createWarehouse({ network, logger });
 
     return {
         code,
@@ -31,6 +45,8 @@ function createSession(code, label, onEvent) {
             network.connect(code, () => {
                 farm.startFarmCheckLoop();
                 friend.startFriendCheckLoop();
+                task.startTaskCheck();
+                warehouse.startSellLoop(60000);
             });
         },
 
@@ -38,6 +54,8 @@ function createSession(code, label, onEvent) {
             logger.log('退出', '正在断开...');
             farm.stopFarmCheckLoop();
             friend.stopFriendCheckLoop();
+            task.stopTaskCheck();
+            warehouse.stopSellLoop();
             network.cleanup();
             const ws = network.getWs();
             if (ws) ws.close();

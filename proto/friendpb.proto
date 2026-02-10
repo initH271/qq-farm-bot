@@ -60,3 +60,35 @@ message SyncAllReply {
     // repeated Invitation invitations = 2;  // 略
     int64 application_count = 3;
 }
+
+// ============ 好友申请 ============
+
+message FriendApplication {
+    int64 gid = 1;
+    string name = 2;
+    string avatar_url = 3;
+    string remark = 4;
+    int64 level = 5;
+}
+
+message GetApplicationsRequest {}
+
+message GetApplicationsReply {
+    repeated FriendApplication applications = 1;
+}
+
+message AcceptFriendsRequest {
+    repeated int64 gids = 1;
+}
+
+message AcceptFriendsReply {}
+
+// ============ 好友推送通知 ============
+
+message FriendApplicationReceivedNotify {
+    repeated FriendApplication applications = 1;
+}
+
+message FriendAddedNotify {
+    repeated GameFriend friends = 1;
+}

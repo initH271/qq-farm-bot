@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package gamepb.itempb;
+
+import "corepb.proto";
+
+// ============ 背包/仓库 ============
+
+message BagRequest {}
+
+message BagReply {
+    corepb.ItemBag item_bag = 1;
+}
+
+// ============ 出售物品 ============
+
+message SellRequest {
+    repeated corepb.Item items = 1;
+}
+
+message SellReply {
+    int64 gold = 1;
+}
+
+// ============ 使用物品 ============
+
+message UseRequest {
+    int64 item_id = 1;
+    int64 count = 2;
+    repeated int64 land_ids = 3;
+}
+
+message UseReply {
+    repeated corepb.Item items = 1;
+}
+
+// ============ 批量使用物品 ============
+
+message UseItem {
+    int64 item_id = 1;
+    int64 count = 2;
+}
+
+message BatchUseRequest {
+    repeated UseItem items = 1;
+}
+
+message BatchUseReply {
+    repeated corepb.Item items = 1;
+}

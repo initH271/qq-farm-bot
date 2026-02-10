@@ -32,6 +32,7 @@ function createNetwork(deps) {
         name: '',
         level: 0,
         gold: 0,
+        exp: 0,
     };
 
     function getUserState() { return userState; }
@@ -132,11 +133,130 @@ function createNetwork(deps) {
         try {
             const event = types.EventMessage.decode(msg.body);
             const type = event.message_type || '';
+            const eventBody = event.body;
+
+            // 被踢下线
             if (type.includes('Kickout')) {
                 log('推送', `被踢下线! ${type}`);
+                try {
+                    const notify = types.KickoutNotify.decode(eventBody);
+                    log('推送', `原因: ${notify.reason_message || '未知'}`);
+                } catch (e) { }
                 emit({ type: 'kickout' });
+                return;
             }
-        } catch (e) { }
+
+            // 土地状态变化
+            if (type.includes('LandsNotify')) {
+                try {
+                    const notify = types.LandsNotify.decode(eventBody);
+                    const hostGid = toNum(notify.host_gid);
+                    const lands = notify.lands || [];
+                    if (lands.length > 0 && (hostGid === userState.gid || hostGid === 0)) {
+                        emit({ type: 'lands_changed', lands });
+                    }
+                } catch (e) { }
+                return;
+            }
+
+            // 物品变化通知（经验/金币等）
+            if (type.includes('ItemNotify')) {
+                try {
+                    const notify = types.ItemNotify.decode(eventBody);
+                    const items = notify.items || [];
+                    for (const itemChg of items) {
+                        const item = itemChg.item;
+                        if (!item) continue;
+                        const id = toNum(item.id);
+                        const count = toNum(item.count);
+                        const delta = toNum(itemChg.delta);
+
+                        if (id === 1) {
+                            userState.gold = count;
+                            if (delta !== 0) {
+                                log('物品', `金币 ${delta > 0 ? '+' : ''}${delta} (当前: ${count})`);
+                            }
+                        } else if (id === 1101) {
+                            userState.exp = count;
+                        }
+                    }
+                    emit({ type: 'item_notify', items });
+                } catch (e) { }
+                return;
+            }
+
+            // 基本信息变化（升级等）
+            if (type.includes('BasicNotify')) {
+                try {
+                    const notify = types.BasicNotify.decode(eventBody);
+                    if (notify.basic) {
+                        const oldLevel = userState.level;
+                        userState.level = toNum(notify.basic.level) || userState.level;
+                        userState.gold = toNum(notify.basic.gold) || userState.gold;
+                        const exp = toNum(notify.basic.exp);
+                        if (exp > 0) userState.exp = exp;
+
+                        if (userState.level !== oldLevel) {
+                            log('系统', `升级! Lv${oldLevel} → Lv${userState.level}`);
+                        }
+                        emit({ type: 'basic_notify', basic: notify.basic });
+                    }
+                } catch (e) { }
+                return;
+            }
+
+            // 任务状态变化通知
+            if (type.includes('TaskInfoNotify')) {
+                try {
+                    const notify = types.TaskInfoNotify.decode(eventBody);
+                    if (notify.task_info) {
+                        emit({ type: 'task_notify', taskInfo: notify.task_info });
+                    }
+                } catch (e) { }
+                return;
+            }
+
+            // 商品解锁通知
+            if (type.includes('GoodsUnlockNotify')) {
+                try {
+                    const notify = types.GoodsUnlockNotify.decode(eventBody);
+                    const goods = notify.goods_list || [];
+                    if (goods.length > 0) {
+                        log('商店', `解锁 ${goods.length} 个新商品!`);
+                    }
+                    emit({ type: 'goods_unlock' });
+                } catch (e) { }
+                return;
+            }
+
+            // 好友申请通知
+            if (type.includes('FriendApplicationReceivedNotify')) {
+                try {
+                    const notify = types.FriendApplicationReceivedNotify.decode(eventBody);
+                    const applications = notify.applications || [];
+                    if (applications.length > 0) {
+                        log('好友', `收到 ${applications.length} 个好友申请`);
+                    }
+                } catch (e) { }
+                return;
+            }
+
+            // 好友添加成功通知
+            if (type.includes('FriendAddedNotify')) {
+                try {
+                    const notify = types.FriendAddedNotify.decode(eventBody);
+                    const friends = notify.friends || [];
+                    if (friends.length > 0) {
+                        const names = friends.map(f => f.name || f.remark || `GID:${toNum(f.gid)}`).join(', ');
+                        log('好友', `新好友: ${names}`);
+                    }
+                } catch (e) { }
+                return;
+            }
+
+        } catch (e) {
+            logWarn('推送', `解码失败: ${e.message}`);
+        }
     }
 
     // ============ 登录 ============
@@ -171,6 +291,7 @@ function createNetwork(deps) {
                     userState.name = reply.basic.name || '未知';
                     userState.level = toNum(reply.basic.level);
                     userState.gold = toNum(reply.basic.gold);
+                    userState.exp = toNum(reply.basic.exp);
 
                     logger.setPrefix(userState.name);
 

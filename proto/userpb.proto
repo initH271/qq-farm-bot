@@ -101,3 +101,18 @@ message HeartbeatReply {
     int64 server_time = 1;
     VersionInfo version_info = 2;
 }
+
+// ============ 基本信息变化推送 ============
+message BasicNotify {
+    BasicInfo basic = 1;
+}
+
+// ============ 上报分享链接点击 ============
+message ReportArkClickRequest {
+    int64 sharer_id = 1;
+    string sharer_open_id = 2;
+    int64 share_cfg_id = 3;
+    string scene_id = 4;
+}
+
+message ReportArkClickReply {}

@@ -6,5 +6,6 @@ RUN pnpm install --prod
 COPY client.js ./
 COPY src/ ./src/
 COPY proto/ ./proto/
+COPY gameConfig/ ./gameConfig/
 USER node
 ENTRYPOINT ["node", "client.js"]
