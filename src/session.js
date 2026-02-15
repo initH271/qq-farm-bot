@@ -21,18 +21,22 @@ function createSession(code, label, onEvent) {
     const timeSync = createTimeSync();
     const logger = createLogger(prefix);
 
-    // 包装 onEvent，拦截 task_notify 事件转发给 task 模块
+    // 包装 onEvent，拦截事件转发给对应模块
     let task = null;
+    let friend = null;
     function wrappedOnEvent(event) {
         if (event.type === 'task_notify' && task) {
             task.onTaskNotify(event.taskInfo);
+        }
+        if (event.type === 'friend_application_received' && friend) {
+            friend.onFriendApplicationReceived();
         }
         if (onEvent) onEvent(event);
     }
 
     const network = createNetwork({ timeSync, logger, onEvent: wrappedOnEvent });
     const farm = createFarm({ network, timeSync, logger });
-    const friend = createFriend({ network, timeSync, logger, farm });
+    friend = createFriend({ network, timeSync, logger, farm });
     task = createTask({ network, logger });
     const warehouse = createWarehouse({ network, logger });
 
@@ -47,6 +51,7 @@ function createSession(code, label, onEvent) {
                 friend.startFriendCheckLoop();
                 task.startTaskCheck();
                 warehouse.startSellLoop(60000);
+                setTimeout(() => friend.checkAndAcceptApplications(), 3000);
             });
         },
 

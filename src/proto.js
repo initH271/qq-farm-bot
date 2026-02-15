@@ -54,6 +54,8 @@ async function loadProto() {
     types.RemovePlantReply = root.lookupType('gamepb.plantpb.RemovePlantReply');
     types.PlantRequest = root.lookupType('gamepb.plantpb.PlantRequest');
     types.PlantReply = root.lookupType('gamepb.plantpb.PlantReply');
+    types.FertilizeRequest = root.lookupType('gamepb.plantpb.FertilizeRequest');
+    types.FertilizeReply = root.lookupType('gamepb.plantpb.FertilizeReply');
 
     // 商店
     types.ShopProfilesRequest = root.lookupType('gamepb.shoppb.ShopProfilesRequest');

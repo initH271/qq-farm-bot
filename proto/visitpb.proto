@@ -30,6 +30,7 @@ message EnterReply {
     repeated gamepb.plantpb.LandInfo lands = 2;     // 好友的所有土地
     // field 3: brief_dog_info (不需要)
     // field 4: nudge_info (不需要)
+    repeated gamepb.plantpb.OperationLimit operation_limits = 5;  // 操作限次
 }
 
 // ============ 离开好友农场 ============

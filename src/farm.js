@@ -82,6 +82,15 @@ function createFarm(deps) {
         return types.RemovePlantReply.decode(replyBody);
     }
 
+    async function fertilize(landIds, fertilizerId) {
+        const body = types.FertilizeRequest.encode(types.FertilizeRequest.create({
+            land_ids: landIds,
+            fertilizer_id: toLong(fertilizerId),
+        })).finish();
+        const { body: replyBody } = await sendMsgAsync('gamepb.plantpb.PlantService', 'Fertilize', body);
+        return types.FertilizeReply.decode(replyBody);
+    }
+
     // ============ 商店 API ============
 
     async function getShopInfo(shopId) {
@@ -136,7 +145,7 @@ function createFarm(deps) {
         return successCount;
     }
 
-    async function findBestSeed() {
+    async function findSeeds() {
         const SEED_SHOP_ID = 2;
         const shopReply = await getShopInfo(SEED_SHOP_ID);
         if (!shopReply.goods_list || shopReply.goods_list.length === 0) {
@@ -181,8 +190,10 @@ function createFarm(deps) {
             return null;
         }
 
-        available.sort((a, b) => b.requiredLevel - a.requiredLevel);
-        return available[0];
+        const byLevel = [...available].sort((a, b) => b.requiredLevel - a.requiredLevel);
+        const byPrice = [...available].sort((a, b) => a.price - b.price);
+
+        return { best: byLevel[0], cheapest: byPrice[0] };
     }
 
     async function autoPlantEmptyLands(deadLandIds, emptyLandIds) {
@@ -211,54 +222,123 @@ function createFarm(deps) {
 
         if (landsToPlant.length === 0) return;
 
-        let bestSeed;
+        let seeds;
         try {
-            bestSeed = await findBestSeed();
+            seeds = await findSeeds();
         } catch (e) {
             logWarn('商店', `查询失败: ${e.message}`);
             return;
         }
-        if (!bestSeed) return;
+        if (!seeds) return;
 
-        log('商店', `最佳种子: goods_id=${bestSeed.goodsId} item_id=${bestSeed.seedId} 价格=${bestSeed.price}金币 (等级要求:${bestSeed.requiredLevel})`);
+        const { best, cheapest } = seeds;
+        const sameSeed = best.seedId === cheapest.seedId;
 
-        const needCount = landsToPlant.length;
-        const totalCost = bestSeed.price * needCount;
-        if (totalCost > state.gold) {
-            logWarn('商店', `金币不足! 需要 ${totalCost} 金币, 当前 ${state.gold} 金币`);
-            const canBuy = Math.floor(state.gold / bestSeed.price);
-            if (canBuy <= 0) return;
-            landsToPlant = landsToPlant.slice(0, canBuy);
-            log('商店', `金币有限，只种 ${canBuy} 块地`);
+        if (sameSeed) {
+            log('商店', `最佳种子与最便宜种子相同: goods_id=${best.goodsId} item_id=${best.seedId} 价格=${best.price}金币 (等级要求:${best.requiredLevel})`);
+        } else {
+            log('商店', `高级种子: goods_id=${best.goodsId} item_id=${best.seedId} 价格=${best.price}金币 (等级要求:${best.requiredLevel})`);
+            log('商店', `低价种子: goods_id=${cheapest.goodsId} item_id=${cheapest.seedId} 价格=${cheapest.price}金币 (等级要求:${cheapest.requiredLevel})`);
         }
 
-        let actualSeedId = bestSeed.seedId;
-        try {
-            const buyReply = await buyGoods(bestSeed.goodsId, landsToPlant.length, bestSeed.price);
-            if (buyReply.get_items && buyReply.get_items.length > 0) {
-                const gotItem = buyReply.get_items[0];
-                const gotId = toNum(gotItem.id);
-                const gotCount = toNum(gotItem.count);
-                log('购买', `获得物品: id=${gotId} count=${gotCount}`);
-                if (gotId > 0) actualSeedId = gotId;
+        // 购买+种植辅助函数，返回实际种植的土地数
+        async function buyAndPlant(seed, lands, label) {
+            if (lands.length === 0) return 0;
+
+            const totalCost = seed.price * lands.length;
+            if (totalCost > state.gold) {
+                const canBuy = Math.floor(state.gold / seed.price);
+                if (canBuy <= 0) {
+                    logWarn('商店', `${label}: 金币不足，跳过`);
+                    return 0;
+                }
+                lands = lands.slice(0, canBuy);
+                log('商店', `${label}: 金币有限，只种 ${canBuy} 块地`);
             }
-            if (buyReply.cost_items) {
-                for (const item of buyReply.cost_items) {
-                    state.gold -= toNum(item.count);
+
+            let actualSeedId = seed.seedId;
+            try {
+                const buyReply = await buyGoods(seed.goodsId, lands.length, seed.price);
+                if (buyReply.get_items && buyReply.get_items.length > 0) {
+                    const gotItem = buyReply.get_items[0];
+                    const gotId = toNum(gotItem.id);
+                    const gotCount = toNum(gotItem.count);
+                    log('购买', `${label}: 获得物品 id=${gotId} count=${gotCount}`);
+                    if (gotId > 0) actualSeedId = gotId;
+                }
+                if (buyReply.cost_items) {
+                    for (const item of buyReply.cost_items) {
+                        state.gold -= toNum(item.count);
+                    }
+                }
+                log('购买', `${label}: 已购买种子x${lands.length}, 花费 ${seed.price * lands.length} 金币, seed_id=${actualSeedId}`);
+            } catch (e) {
+                logWarn('购买', `${label}: ${e.message}`);
+                return 0;
+            }
+            await sleep(500);
+
+            try {
+                const planted = await plantSeeds(actualSeedId, lands);
+                log('种植', `${label}: 已在 ${planted} 块地种植 (${lands.join(',')})`);
+                return planted;
+            } catch (e) {
+                logWarn('种植', `${label}: ${e.message}`);
+                return 0;
+            }
+        }
+
+        const NORMAL_FERTILIZER_ID = 1011;
+
+        if (sameSeed) {
+            // 同一种子：全部购买种植，全部施肥
+            const planted = await buyAndPlant(best, landsToPlant, '种植');
+            if (planted > 0) {
+                let fertilized = 0;
+                for (const landId of landsToPlant) {
+                    try {
+                        await fertilize([landId], NORMAL_FERTILIZER_ID);
+                        fertilized++;
+                    } catch (e) {
+                        log('施肥', `土地#${landId} 施肥失败: ${e.message}，停止施肥`);
+                        break;
+                    }
+                    await sleep(50);
+                }
+                if (fertilized > 0) {
+                    log('施肥', `已对 ${fertilized} 块地施肥`);
                 }
             }
-            log('购买', `已购买种子x${landsToPlant.length}, 花费 ${bestSeed.price * landsToPlant.length} 金币, seed_id=${actualSeedId}`);
-        } catch (e) {
-            logWarn('购买', e.message);
-            return;
-        }
-        await sleep(500);
+        } else {
+            // 不同种子：2/3高级+施肥，1/3低价+不施肥
+            const cheapCount = Math.floor(landsToPlant.length / 3) || (landsToPlant.length >= 2 ? 1 : 0);
+            const bestLands = landsToPlant.slice(0, landsToPlant.length - cheapCount);
+            const cheapLands = landsToPlant.slice(landsToPlant.length - cheapCount);
 
-        try {
-            const planted = await plantSeeds(actualSeedId, landsToPlant);
-            log('种植', `已在 ${planted} 块地种植 (${landsToPlant.join(',')})`);
-        } catch (e) {
-            logWarn('种植', e.message);
+            // 高级种子组
+            const bestPlanted = await buyAndPlant(best, bestLands, '高级种子');
+            if (bestPlanted > 0) {
+                let fertilized = 0;
+                for (const landId of bestLands) {
+                    try {
+                        await fertilize([landId], NORMAL_FERTILIZER_ID);
+                        fertilized++;
+                    } catch (e) {
+                        log('施肥', `土地#${landId} 施肥失败: ${e.message}，停止施肥`);
+                        break;
+                    }
+                    await sleep(50);
+                }
+                if (fertilized > 0) {
+                    log('施肥', `已对 ${fertilized} 块地施肥(高级种子)`);
+                }
+            }
+            await sleep(300);
+
+            // 低价种子组（不施肥）
+            if (cheapLands.length > 0) {
+                await buyAndPlant(cheapest, cheapLands, '低价种子');
+            }
         }
     }
 

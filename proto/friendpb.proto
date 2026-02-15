@@ -78,10 +78,12 @@ message GetApplicationsReply {
 }
 
 message AcceptFriendsRequest {
-    repeated int64 gids = 1;
+    repeated int64 friend_gids = 1;
 }
 
-message AcceptFriendsReply {}
+message AcceptFriendsReply {
+    repeated GameFriend friends = 1;
+}
 
 // ============ 好友推送通知 ============
 

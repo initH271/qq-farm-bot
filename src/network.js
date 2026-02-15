@@ -237,6 +237,7 @@ function createNetwork(deps) {
                     if (applications.length > 0) {
                         log('好友', `收到 ${applications.length} 个好友申请`);
                     }
+                    emit({ type: 'friend_application_received', applications });
                 } catch (e) { }
                 return;
             }
@@ -312,16 +313,40 @@ function createNetwork(deps) {
     }
 
     // ============ 心跳 ============
+    let lastHeartbeatResponse = Date.now();
+    let heartbeatMissCount = 0;
+
     function startHeartbeat() {
         if (heartbeatTimer) clearInterval(heartbeatTimer);
+        lastHeartbeatResponse = Date.now();
+        heartbeatMissCount = 0;
+
         heartbeatTimer = setInterval(() => {
             if (!userState.gid) return;
+
+            // 检查上次心跳响应是否超时
+            const elapsed = Date.now() - lastHeartbeatResponse;
+            if (elapsed > 60000) {
+                heartbeatMissCount++;
+                logWarn('心跳', `超过 ${Math.round(elapsed / 1000)}s 未收到心跳响应 (连续 ${heartbeatMissCount} 次)`);
+                if (heartbeatMissCount >= 2) {
+                    logWarn('心跳', `连续 ${heartbeatMissCount} 次超时，清理所有待处理回调`);
+                    for (const [seq, cb] of pendingCallbacks) {
+                        cb(new Error('心跳超时，连接可能已断开'));
+                    }
+                    pendingCallbacks.clear();
+                }
+            }
+
+            // 发送心跳
             const body = types.HeartbeatRequest.encode(types.HeartbeatRequest.create({
                 gid: toLong(userState.gid),
                 client_version: CONFIG.clientVersion,
             })).finish();
             sendMsg('gamepb.userpb.UserService', 'Heartbeat', body, (err, replyBody) => {
                 if (err || !replyBody) return;
+                lastHeartbeatResponse = Date.now();
+                heartbeatMissCount = 0;
                 try {
                     const reply = types.HeartbeatReply.decode(replyBody);
                     if (reply.server_time) syncServerTime(toNum(reply.server_time));

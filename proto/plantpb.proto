@@ -101,11 +101,13 @@ message MutantInfo {
 
 // ============ 操作限制 ============
 message OperationLimit {
-    int64 operation_id = 1;
-    int64 limit = 2;
-    int64 used = 3;
-    int64 cool_down_time = 4;
-    int64 cool_down_end = 5;
+    int64 id = 1;                   // 操作类型ID
+    int64 day_times = 2;            // 今日已操作次数
+    int64 day_times_lt = 3;         // 每日操作上限
+    int64 day_share_id = 4;         // 分享ID
+    int64 day_exp_times = 5;        // 今日已获得经验次数
+    int64 day_ex_times_lt = 6;      // 每日可获得经验上限
+    int64 day_exp_share_id = 7;     // 经验分享ID
 }
 
 // ============ 请求/回复消息 ============
@@ -203,6 +205,7 @@ message FertilizeRequest {
 message FertilizeReply {
     repeated LandInfo land = 1;
     repeated OperationLimit operation_limits = 2;
+    int64 fertilizer = 3;           // 剩余肥料时间
 }
 
 // --- 放虫 ---
