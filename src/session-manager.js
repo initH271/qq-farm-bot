@@ -86,7 +86,8 @@ function createSessionManager({ telegram, logger }) {
 
         const label = `U${sessions.size + 1}`;
         const onEvent = createEventHandler(code);
-        const session = createSession(code, label, onEvent);
+        const userNotify = (text) => notify(`[${label}] ${text}`);
+        const session = createSession(code, label, onEvent, userNotify);
 
         sessions.set(code, {
             session,

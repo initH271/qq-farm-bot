@@ -1,16 +1,35 @@
 /**
- * 好友农场操作 - 进入/离开/帮忙/偷菜/巡查/好友申请/操作限次/经验耗尽检测
+ * 好友农场操作 - 进入/离开/帮忙/偷菜/放虫/放草/巡查/好友申请/操作限次/经验耗尽检测
  */
 
 const { CONFIG, PlantPhase, PHASE_NAMES } = require('./config');
 const { types } = require('./proto');
 const { toLong, toNum, sleep } = require('./utils');
 
-// 操作 ID 常量
-const OP_HELP_WATER = 10001;
-const OP_HELP_INSECT = 10002;
-const OP_HELP_WEED = 10003;
-const OP_STEAL = 10004;
+// 操作 ID 常量（与游戏服务器一致）
+// 10001=收获, 10002=铲除, 10003=放草, 10004=放虫
+// 10005=除草(帮好友), 10006=除虫(帮好友), 10007=浇水(帮好友), 10008=偷菜
+const OP_PUT_WEED = 10003;
+const OP_PUT_INSECT = 10004;
+const OP_HELP_WEED = 10005;
+const OP_HELP_INSECT = 10006;
+const OP_HELP_WATER = 10007;
+const OP_STEAL = 10008;
+
+const OP_NAMES = {
+    10003: '放草',
+    10004: '放虫',
+    10005: '除草',
+    10006: '除虫',
+    10007: '浇水',
+    10008: '偷菜',
+};
+
+// 配置: 是否只在有经验时才帮助好友
+const HELP_ONLY_WITH_EXP = true;
+
+// 配置: 是否启用放虫放草功能
+const ENABLE_PUT_BAD_THINGS = true;
 
 /**
  * 创建一个独立的好友管理实例
@@ -21,7 +40,7 @@ const OP_STEAL = 10004;
  * @param {Object} deps.farm     - { getCurrentPhase }
  */
 function createFriend(deps) {
-    const { network, timeSync, logger, farm } = deps;
+    const { network, timeSync, logger, farm, notify } = deps;
     const { sendMsgAsync, getUserState } = network;
     const { getServerTimeSec } = timeSync;
     const { log, logWarn } = logger;
@@ -33,54 +52,106 @@ function createFriend(deps) {
     let friendCheckTimer = null;
 
     // 操作限次跟踪
-    // Map<opId, { dayTimes, dayTimesLimit, dayExpTimes, dayExpTimesLimit }>
     let operationLimits = new Map();
+
+    // 经验 delta 追踪
+    const expTracker = new Map();    // opId -> 帮忙前的 dayExpTimes
+    const expExhausted = new Set();  // 经验已耗尽的操作类型
+
+    // 每日重置
+    let lastResetDate = '';
+
+    // ============ 每日重置 ============
+
+    function getLocalDateKey() {
+        const d = new Date();
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    }
+
+    function checkDailyReset() {
+        const today = getLocalDateKey();
+        if (lastResetDate !== today) {
+            if (lastResetDate !== '') {
+                log('系统', '跨日重置，清空操作限制缓存');
+            }
+            operationLimits.clear();
+            expExhausted.clear();
+            expTracker.clear();
+            lastResetDate = today;
+        }
+    }
 
     // ============ 操作限次函数 ============
 
     function updateOperationLimits(limits) {
-        if (!limits) return;
+        if (!limits || limits.length === 0) return;
+        checkDailyReset();
         for (const limit of limits) {
             const id = toNum(limit.id);
             if (id === 0) continue;
+            const newExpTimes = toNum(limit.day_exp_times);
             operationLimits.set(id, {
                 dayTimes: toNum(limit.day_times),
                 dayTimesLimit: toNum(limit.day_times_lt),
-                dayExpTimes: toNum(limit.day_exp_times),
+                dayExpTimes: newExpTimes,
                 dayExpTimesLimit: toNum(limit.day_ex_times_lt),
             });
+
+            // 经验 delta 追踪：比较帮忙前后的 dayExpTimes
+            if (expTracker.has(id)) {
+                const prevExpTimes = expTracker.get(id);
+                expTracker.delete(id);
+                if (newExpTimes <= prevExpTimes && !expExhausted.has(id)) {
+                    expExhausted.add(id);
+                    const name = OP_NAMES[id] || `#${id}`;
+                    log('限制', `${name} 经验已耗尽 (已获${newExpTimes}次)`);
+                }
+            }
+        }
+    }
+
+    function markExpCheck(opId) {
+        const limit = operationLimits.get(opId);
+        if (limit) {
+            expTracker.set(opId, limit.dayExpTimes);
         }
     }
 
     function canDoOperation(opId) {
         const info = operationLimits.get(opId);
         if (!info) return true;
+        if (info.dayTimesLimit <= 0) return true;
         return info.dayTimes < info.dayTimesLimit;
     }
 
     function getRemainingCount(opId) {
         const info = operationLimits.get(opId);
         if (!info) return Infinity;
+        if (info.dayTimesLimit <= 0) return Infinity;
         return Math.max(0, info.dayTimesLimit - info.dayTimes);
     }
 
-    function checkExpExhausted(opId) {
-        const info = operationLimits.get(opId);
-        if (!info) return false;
-        return info.dayExpTimes >= info.dayExpTimesLimit;
+    function canGetExp(opId) {
+        if (expExhausted.has(opId)) return false;
+        const limit = operationLimits.get(opId);
+        if (!limit) return true;
+        if (limit.dayExpTimesLimit > 0) {
+            return limit.dayExpTimes < limit.dayExpTimesLimit;
+        }
+        return true; // dayExpTimesLimit=0 时依赖 delta 追踪
     }
 
     function logOperationLimits() {
         if (operationLimits.size === 0) return;
-        const names = { [OP_HELP_WATER]: '浇水', [OP_HELP_INSECT]: '除虫', [OP_HELP_WEED]: '除草', [OP_STEAL]: '偷菜' };
         const parts = [];
-        for (const [opId, name] of Object.entries(names)) {
+        for (const [opId, name] of Object.entries(OP_NAMES)) {
             const id = Number(opId);
             const info = operationLimits.get(id);
             if (!info) continue;
-            const remaining = Math.max(0, info.dayTimesLimit - info.dayTimes);
-            const expExhausted = info.dayExpTimes >= info.dayExpTimesLimit;
-            parts.push(`${name}:${remaining}/${info.dayTimesLimit}${expExhausted ? '(经验满)' : ''}`);
+            const remaining = info.dayTimesLimit > 0 ? Math.max(0, info.dayTimesLimit - info.dayTimes) : '∞';
+            const limitStr = info.dayTimesLimit > 0 ? info.dayTimesLimit : '∞';
+            const exhausted = expExhausted.has(id);
+            parts.push(`${name}:${remaining}/${limitStr}${exhausted ? '(经验满)' : ''}`);
         }
         if (parts.length > 0) {
             log('限次', `剩余次数: ${parts.join(' | ')}`);
@@ -150,6 +221,28 @@ function createFriend(deps) {
         return types.HarvestReply.decode(replyBody);
     }
 
+    async function putInsects(friendGid, landIds) {
+        const body = types.PutInsectsRequest.encode(types.PutInsectsRequest.create({
+            land_ids: landIds,
+            host_gid: toLong(friendGid),
+        })).finish();
+        const { body: replyBody } = await sendMsgAsync('gamepb.plantpb.PlantService', 'PutInsects', body);
+        const reply = types.PutInsectsReply.decode(replyBody);
+        updateOperationLimits(reply.operation_limits);
+        return reply;
+    }
+
+    async function putWeeds(friendGid, landIds) {
+        const body = types.PutWeedsRequest.encode(types.PutWeedsRequest.create({
+            land_ids: landIds,
+            host_gid: toLong(friendGid),
+        })).finish();
+        const { body: replyBody } = await sendMsgAsync('gamepb.plantpb.PlantService', 'PutWeeds', body);
+        const reply = types.PutWeedsReply.decode(replyBody);
+        updateOperationLimits(reply.operation_limits);
+        return reply;
+    }
+
     // ============ 好友申请 API ============
 
     async function getApplications() {
@@ -189,8 +282,8 @@ function createFriend(deps) {
 
     // ============ 好友土地分析 ============
 
-    function analyzeFriendLands(lands) {
-        const result = { stealable: [], needWater: [], needWeed: [], needBug: [] };
+    function analyzeFriendLands(lands, myGid) {
+        const result = { stealable: [], needWater: [], needWeed: [], needBug: [], canPutWeed: [], canPutBug: [] };
 
         for (const land of lands) {
             const id = toNum(land.id);
@@ -211,13 +304,23 @@ function createFriend(deps) {
             if (toNum(plant.dry_num) > 0) result.needWater.push(id);
             if (plant.weed_owners && plant.weed_owners.length > 0) result.needWeed.push(id);
             if (plant.insect_owners && plant.insect_owners.length > 0) result.needBug.push(id);
+
+            // 放虫/放草判断：每块地最多2个虫/草主人，且自己没放过
+            if (ENABLE_PUT_BAD_THINGS && myGid) {
+                const weedOwners = plant.weed_owners || [];
+                const insectOwners = plant.insect_owners || [];
+                const iAlreadyPutWeed = weedOwners.some(gid => toNum(gid) === myGid);
+                const iAlreadyPutBug = insectOwners.some(gid => toNum(gid) === myGid);
+                if (weedOwners.length < 2 && !iAlreadyPutWeed) result.canPutWeed.push(id);
+                if (insectOwners.length < 2 && !iAlreadyPutBug) result.canPutBug.push(id);
+            }
         }
         return result;
     }
 
     // ============ 拜访好友 ============
 
-    async function visitFriend(friend, totalActions) {
+    async function visitFriend(friend, totalActions, myGid) {
         const { gid, name, reason } = friend;
         log('拜访', `${name} (${reason})`);
 
@@ -256,12 +359,14 @@ function createFriend(deps) {
             if (lands.length > 5) log('拜访', `  ... 还有 ${lands.length - 5} 块`);
         }
 
-        const status = analyzeFriendLands(lands);
+        const status = analyzeFriendLands(lands, myGid);
         const parts = [];
         if (status.stealable.length) parts.push(`可偷:${status.stealable.length}`);
         if (status.needWater.length) parts.push(`缺水:${status.needWater.length}`);
         if (status.needWeed.length) parts.push(`有草:${status.needWeed.length}`);
         if (status.needBug.length) parts.push(`有虫:${status.needBug.length}`);
+        if (status.canPutWeed.length) parts.push(`可放草:${status.canPutWeed.length}`);
+        if (status.canPutBug.length) parts.push(`可放虫:${status.canPutBug.length}`);
 
         if (parts.length === 0) {
             log('拜访', `${name} 无需操作`);
@@ -272,7 +377,9 @@ function createFriend(deps) {
 
         // 除草（带限次和经验耗尽检测）
         if (status.needWeed.length > 0 && canDoOperation(OP_HELP_WEED)) {
-            if (!checkExpExhausted(OP_HELP_WEED)) {
+            const shouldHelp = !HELP_ONLY_WITH_EXP || canGetExp(OP_HELP_WEED);
+            if (shouldHelp) {
+                markExpCheck(OP_HELP_WEED);
                 let ok = 0, fail = 0;
                 for (const landId of status.needWeed) {
                     if (!canDoOperation(OP_HELP_WEED)) break;
@@ -281,7 +388,7 @@ function createFriend(deps) {
                         updateOperationLimits(reply.operation_limits);
                         ok++;
                     } catch (e) { fail++; if (isFirstFriendCheck) log('拜访', `  除草#${landId}失败: ${e.message}`); }
-                    await sleep(300);
+                    await sleep(100);
                 }
                 if (ok > 0) { log('帮忙', `帮 ${name} 除草 ${ok} 块${fail > 0 ? ` (${fail}块失败)` : ''}`); totalActions.weed += ok; }
             } else {
@@ -291,7 +398,9 @@ function createFriend(deps) {
 
         // 除虫（带限次和经验耗尽检测）
         if (status.needBug.length > 0 && canDoOperation(OP_HELP_INSECT)) {
-            if (!checkExpExhausted(OP_HELP_INSECT)) {
+            const shouldHelp = !HELP_ONLY_WITH_EXP || canGetExp(OP_HELP_INSECT);
+            if (shouldHelp) {
+                markExpCheck(OP_HELP_INSECT);
                 let ok = 0, fail = 0;
                 for (const landId of status.needBug) {
                     if (!canDoOperation(OP_HELP_INSECT)) break;
@@ -300,7 +409,7 @@ function createFriend(deps) {
                         updateOperationLimits(reply.operation_limits);
                         ok++;
                     } catch (e) { fail++; if (isFirstFriendCheck) log('拜访', `  除虫#${landId}失败: ${e.message}`); }
-                    await sleep(300);
+                    await sleep(100);
                 }
                 if (ok > 0) { log('帮忙', `帮 ${name} 除虫 ${ok} 块${fail > 0 ? ` (${fail}块失败)` : ''}`); totalActions.bug += ok; }
             } else {
@@ -310,7 +419,9 @@ function createFriend(deps) {
 
         // 浇水（带限次和经验耗尽检测）
         if (status.needWater.length > 0 && canDoOperation(OP_HELP_WATER)) {
-            if (!checkExpExhausted(OP_HELP_WATER)) {
+            const shouldHelp = !HELP_ONLY_WITH_EXP || canGetExp(OP_HELP_WATER);
+            if (shouldHelp) {
+                markExpCheck(OP_HELP_WATER);
                 let ok = 0, fail = 0;
                 for (const landId of status.needWater) {
                     if (!canDoOperation(OP_HELP_WATER)) break;
@@ -319,7 +430,7 @@ function createFriend(deps) {
                         updateOperationLimits(reply.operation_limits);
                         ok++;
                     } catch (e) { fail++; if (isFirstFriendCheck) log('拜访', `  浇水#${landId}失败: ${e.message}`); }
-                    await sleep(300);
+                    await sleep(100);
                 }
                 if (ok > 0) { log('帮忙', `帮 ${name} 浇水 ${ok} 块${fail > 0 ? ` (${fail}块失败)` : ''}`); totalActions.water += ok; }
             } else {
@@ -340,7 +451,7 @@ function createFriend(deps) {
                     failCount++;
                     if (isFirstFriendCheck) log('拜访', `  偷菜#${landId}失败: ${e.message}`);
                 }
-                await sleep(300);
+                await sleep(100);
             }
             if (stoleCount > 0) {
                 log('偷菜', `从 ${name} 偷了 ${stoleCount} 块地${failCount > 0 ? ` (${failCount}块失败)` : ''}`);
@@ -348,6 +459,32 @@ function createFriend(deps) {
             } else if (failCount > 0) {
                 log('偷菜', `${name} 全部 ${failCount} 块偷取失败`);
             }
+        }
+
+        // 放虫（带限次检测）
+        if (ENABLE_PUT_BAD_THINGS && status.canPutBug.length > 0 && canDoOperation(OP_PUT_INSECT)) {
+            let ok = 0;
+            const remaining = getRemainingCount(OP_PUT_INSECT);
+            const toProcess = status.canPutBug.slice(0, remaining);
+            for (const landId of toProcess) {
+                if (!canDoOperation(OP_PUT_INSECT)) break;
+                try { await putInsects(gid, [landId]); ok++; } catch (e) { /* ignore */ }
+                await sleep(100);
+            }
+            if (ok > 0) { log('捣乱', `给 ${name} 放虫 ${ok} 块`); totalActions.putBug += ok; if (notify) notify(`🐛 给 ${name} 放虫 ${ok} 块`); }
+        }
+
+        // 放草（带限次检测）
+        if (ENABLE_PUT_BAD_THINGS && status.canPutWeed.length > 0 && canDoOperation(OP_PUT_WEED)) {
+            let ok = 0;
+            const remaining = getRemainingCount(OP_PUT_WEED);
+            const toProcess = status.canPutWeed.slice(0, remaining);
+            for (const landId of toProcess) {
+                if (!canDoOperation(OP_PUT_WEED)) break;
+                try { await putWeeds(gid, [landId]); ok++; } catch (e) { /* ignore */ }
+                await sleep(100);
+            }
+            if (ok > 0) { log('捣乱', `给 ${name} 放草 ${ok} 块`); totalActions.putWeed += ok; if (notify) notify(`🌿 给 ${name} 放草 ${ok} 块`); }
         }
 
         await leaveFriendFarm(gid);
@@ -359,6 +496,8 @@ function createFriend(deps) {
         const state = getUserState();
         if (isCheckingFriends || !state.gid) return;
         isCheckingFriends = true;
+
+        checkDailyReset();
 
         try {
             const friendsReply = await getAllFriends();
@@ -394,13 +533,25 @@ function createFriend(deps) {
                 }
             }
 
+            // 放虫放草：即使好友状态摘要无需操作也要拜访（好友列表不展示放虫放草信息）
+            if (ENABLE_PUT_BAD_THINGS) {
+                for (const f of friends) {
+                    const gid = toNum(f.gid);
+                    if (gid === state.gid) continue;
+                    if (visitedGids.has(gid)) continue;
+                    const name = f.remark || f.name || `GID:${gid}`;
+                    friendsToVisit.push({ gid, name, reason: '放虫放草' });
+                    visitedGids.add(gid);
+                }
+            }
+
             if (friendsToVisit.length === 0) { log('好友', '所有好友农场无需操作'); return; }
             log('好友', `${friendsToVisit.length} 位好友需要拜访`);
 
-            let totalActions = { steal: 0, water: 0, weed: 0, bug: 0 };
+            let totalActions = { steal: 0, water: 0, weed: 0, bug: 0, putBug: 0, putWeed: 0 };
             for (const friend of friendsToVisit) {
-                try { await visitFriend(friend, totalActions); } catch (e) { logWarn('好友', `拜访 ${friend.name} 失败: ${e.message}`); }
-                await sleep(800);
+                try { await visitFriend(friend, totalActions, state.gid); } catch (e) { logWarn('好友', `拜访 ${friend.name} 失败: ${e.message}`); }
+                await sleep(500);
             }
 
             const summary = [];
@@ -408,7 +559,13 @@ function createFriend(deps) {
             if (totalActions.water > 0) summary.push(`浇水:${totalActions.water}块`);
             if (totalActions.weed > 0) summary.push(`除草:${totalActions.weed}块`);
             if (totalActions.bug > 0) summary.push(`除虫:${totalActions.bug}块`);
+            if (totalActions.putBug > 0) summary.push(`放虫:${totalActions.putBug}块`);
+            if (totalActions.putWeed > 0) summary.push(`放草:${totalActions.putWeed}块`);
             log('好友', `巡查完毕! ${summary.length > 0 ? summary.join(' | ') : '无操作'}`);
+            if (summary.length > 0 && notify) {
+                const header = `👥 好友巡查完毕 (${friendsToVisit.length}/${friends.length})`;
+                notify(`${header}\n${summary.join(' | ')}`);
+            }
             isFirstFriendCheck = false;
         } catch (err) {
             logWarn('好友', `巡查失败: ${err.message}`);

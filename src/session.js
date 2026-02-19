@@ -15,7 +15,7 @@ const { createWarehouse } = require('./warehouse');
  * @param {string} [label] - 日志标识（可选，默认用 code 前8位）
  * @param {Function} [onEvent] - 网络事件回调（可选）
  */
-function createSession(code, label, onEvent) {
+function createSession(code, label, onEvent, notify) {
     const prefix = label || code.substring(0, 8);
 
     const timeSync = createTimeSync();
@@ -35,8 +35,8 @@ function createSession(code, label, onEvent) {
     }
 
     const network = createNetwork({ timeSync, logger, onEvent: wrappedOnEvent });
-    const farm = createFarm({ network, timeSync, logger });
-    friend = createFriend({ network, timeSync, logger, farm });
+    const farm = createFarm({ network, timeSync, logger, notify });
+    friend = createFriend({ network, timeSync, logger, farm, notify });
     task = createTask({ network, logger });
     const warehouse = createWarehouse({ network, logger });
 

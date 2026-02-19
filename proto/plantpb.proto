@@ -234,6 +234,6 @@ message PutWeedsReply {
 
 // 土地状态变化通知
 message LandsNotify {
-    int64 host_gid = 1;
-    repeated LandInfo lands = 2;
+    repeated LandInfo lands = 1;   // 变化的土地列表
+    int64 host_gid = 2;            // 农场主GID
 }

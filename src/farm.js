@@ -15,7 +15,7 @@ const { toLong, toNum, toTimeSec, sleep } = require('./utils');
  * @param {Object} deps.logger   - { log, logWarn }
  */
 function createFarm(deps) {
-    const { network, timeSync, logger } = deps;
+    const { network, timeSync, logger, notify } = deps;
     const { sendMsgAsync, getUserState } = network;
     const { getServerTimeSec } = timeSync;
     const { log, logWarn } = logger;
@@ -24,6 +24,7 @@ function createFarm(deps) {
     let isCheckingFarm = false;
     let isFirstFarmCheck = true;
     let farmCheckTimer = null;
+    let organicFertDepleted = false;
 
     // ============ 农场 API ============
 
@@ -83,12 +84,47 @@ function createFarm(deps) {
     }
 
     async function fertilize(landIds, fertilizerId) {
-        const body = types.FertilizeRequest.encode(types.FertilizeRequest.create({
-            land_ids: landIds,
-            fertilizer_id: toLong(fertilizerId),
-        })).finish();
-        const { body: replyBody } = await sendMsgAsync('gamepb.plantpb.PlantService', 'Fertilize', body);
-        return types.FertilizeReply.decode(replyBody);
+        let successCount = 0;
+        for (const landId of landIds) {
+            try {
+                const body = types.FertilizeRequest.encode(types.FertilizeRequest.create({
+                    land_ids: [toLong(landId)],
+                    fertilizer_id: toLong(fertilizerId),
+                })).finish();
+                await sendMsgAsync('gamepb.plantpb.PlantService', 'Fertilize', body);
+                successCount++;
+            } catch (e) {
+                log('施肥', `土地#${landId} 施肥失败: ${e.message}，停止施肥`);
+                break;
+            }
+            if (landIds.length > 1) await sleep(50);
+        }
+        return successCount;
+    }
+
+    async function fertilizeOrganic(landIds, fertilizerId) {
+        let successCount = 0;
+        for (const landId of landIds) {
+            try {
+                const body = types.FertilizeRequest.encode(types.FertilizeRequest.create({
+                    land_ids: [toLong(landId)],
+                    fertilizer_id: toLong(fertilizerId),
+                })).finish();
+                await sendMsgAsync('gamepb.plantpb.PlantService', 'Fertilize', body);
+                successCount++;
+            } catch (e) {
+                // 物品不足等全局性错误，停止所有施肥
+                if (e.message && /不足|没有|不够/.test(e.message)) {
+                    log('施肥', `有机肥不足，停止施肥: ${e.message}`);
+                    organicFertDepleted = true;
+                    if (notify) notify(`⚠️ 有机肥已耗尽`);
+                    break;
+                }
+                // 单块地失败（已成熟等），跳过继续
+            }
+            if (landIds.length > 1) await sleep(50);
+        }
+        return successCount;
     }
 
     // ============ 商店 API ============
@@ -190,10 +226,12 @@ function createFarm(deps) {
             return null;
         }
 
-        const byLevel = [...available].sort((a, b) => b.requiredLevel - a.requiredLevel);
-        const byPrice = [...available].sort((a, b) => a.price - b.price);
-
-        return { best: byLevel[0], cheapest: byPrice[0] };
+        if (CONFIG.forceLowestLevelCrop) {
+            available.sort((a, b) => a.requiredLevel - b.requiredLevel || a.price - b.price);
+        } else {
+            available.sort((a, b) => b.requiredLevel - a.requiredLevel || b.price - a.price);
+        }
+        return available[0];
     }
 
     async function autoPlantEmptyLands(deadLandIds, emptyLandIds) {
@@ -231,23 +269,16 @@ function createFarm(deps) {
         }
         if (!seeds) return;
 
-        const { best, cheapest } = seeds;
-        const sameSeed = best.seedId === cheapest.seedId;
-
-        if (sameSeed) {
-            log('商店', `最佳种子与最便宜种子相同: goods_id=${best.goodsId} item_id=${best.seedId} 价格=${best.price}金币 (等级要求:${best.requiredLevel})`);
-        } else {
-            log('商店', `高级种子: goods_id=${best.goodsId} item_id=${best.seedId} 价格=${best.price}金币 (等级要求:${best.requiredLevel})`);
-            log('商店', `低价种子: goods_id=${cheapest.goodsId} item_id=${cheapest.seedId} 价格=${cheapest.price}金币 (等级要求:${cheapest.requiredLevel})`);
-        }
+        const seed = seeds;
+        log('商店', `种子: goods_id=${seed.goodsId} item_id=${seed.seedId} 价格=${seed.price}金币 (等级:${seed.requiredLevel})`);
 
         // 购买+种植辅助函数，返回实际种植的土地数
-        async function buyAndPlant(seed, lands, label) {
+        async function buyAndPlant(s, lands, label) {
             if (lands.length === 0) return 0;
 
-            const totalCost = seed.price * lands.length;
+            const totalCost = s.price * lands.length;
             if (totalCost > state.gold) {
-                const canBuy = Math.floor(state.gold / seed.price);
+                const canBuy = Math.floor(state.gold / s.price);
                 if (canBuy <= 0) {
                     logWarn('商店', `${label}: 金币不足，跳过`);
                     return 0;
@@ -256,9 +287,9 @@ function createFarm(deps) {
                 log('商店', `${label}: 金币有限，只种 ${canBuy} 块地`);
             }
 
-            let actualSeedId = seed.seedId;
+            let actualSeedId = s.seedId;
             try {
-                const buyReply = await buyGoods(seed.goodsId, lands.length, seed.price);
+                const buyReply = await buyGoods(s.goodsId, lands.length, s.price);
                 if (buyReply.get_items && buyReply.get_items.length > 0) {
                     const gotItem = buyReply.get_items[0];
                     const gotId = toNum(gotItem.id);
@@ -271,7 +302,7 @@ function createFarm(deps) {
                         state.gold -= toNum(item.count);
                     }
                 }
-                log('购买', `${label}: 已购买种子x${lands.length}, 花费 ${seed.price * lands.length} 金币, seed_id=${actualSeedId}`);
+                log('购买', `${label}: 已购买种子x${lands.length}, 花费 ${s.price * lands.length} 金币, seed_id=${actualSeedId}`);
             } catch (e) {
                 logWarn('购买', `${label}: ${e.message}`);
                 return 0;
@@ -289,56 +320,11 @@ function createFarm(deps) {
         }
 
         const NORMAL_FERTILIZER_ID = 1011;
-
-        if (sameSeed) {
-            // 同一种子：全部购买种植，全部施肥
-            const planted = await buyAndPlant(best, landsToPlant, '种植');
-            if (planted > 0) {
-                let fertilized = 0;
-                for (const landId of landsToPlant) {
-                    try {
-                        await fertilize([landId], NORMAL_FERTILIZER_ID);
-                        fertilized++;
-                    } catch (e) {
-                        log('施肥', `土地#${landId} 施肥失败: ${e.message}，停止施肥`);
-                        break;
-                    }
-                    await sleep(50);
-                }
-                if (fertilized > 0) {
-                    log('施肥', `已对 ${fertilized} 块地施肥`);
-                }
-            }
-        } else {
-            // 不同种子：2/3高级+施肥，1/3低价+不施肥
-            const cheapCount = Math.floor(landsToPlant.length / 3) || (landsToPlant.length >= 2 ? 1 : 0);
-            const bestLands = landsToPlant.slice(0, landsToPlant.length - cheapCount);
-            const cheapLands = landsToPlant.slice(landsToPlant.length - cheapCount);
-
-            // 高级种子组
-            const bestPlanted = await buyAndPlant(best, bestLands, '高级种子');
-            if (bestPlanted > 0) {
-                let fertilized = 0;
-                for (const landId of bestLands) {
-                    try {
-                        await fertilize([landId], NORMAL_FERTILIZER_ID);
-                        fertilized++;
-                    } catch (e) {
-                        log('施肥', `土地#${landId} 施肥失败: ${e.message}，停止施肥`);
-                        break;
-                    }
-                    await sleep(50);
-                }
-                if (fertilized > 0) {
-                    log('施肥', `已对 ${fertilized} 块地施肥(高级种子)`);
-                }
-            }
-            await sleep(300);
-
-            // 低价种子组（不施肥）
-            if (cheapLands.length > 0) {
-                await buyAndPlant(cheapest, cheapLands, '低价种子');
-            }
+        const planted = await buyAndPlant(seed, landsToPlant, '种植');
+        if (planted > 0) {
+            const fertilized = await fertilize(landsToPlant, NORMAL_FERTILIZER_ID);
+            if (fertilized > 0) log('施肥', `已对 ${fertilized} 块地施普通肥`);
+            if (notify) notify(`🌱 种植 ${seed.goodsId} x${planted} 块\n花费 ${seed.price * planted} 金币`);
         }
     }
 
@@ -427,7 +413,7 @@ function createFarm(deps) {
             }
 
             if (phaseVal === PlantPhase.MATURE) {
-                result.harvestable.push(id);
+                result.harvestable.push({ id, name: plantName });
                 if (debug) log('巡田', `    → 结果: 可收获`);
                 continue;
             }
@@ -457,13 +443,14 @@ function createFarm(deps) {
             result.growing.push(id);
             if (debug) {
                 const needStr = landNeeds.length > 0 ? ` 需要: ${landNeeds.join(',')}` : '';
-                log('巡田', `    → 结果: 生长中(${PHASE_NAMES[phaseVal] || phaseVal})${needStr}`);
+                const leftFertTimes = toNum(plant.left_inorc_fert_times);
+                log('巡田', `    → 结果: 生长中(${PHASE_NAMES[phaseVal] || phaseVal})${needStr} left_inorc_fert_times=${leftFertTimes}`);
             }
         }
 
         if (debug) {
             log('巡田', '========== 巡田分析汇总 ==========');
-            log('巡田', `可收获: ${result.harvestable.length} [${result.harvestable.join(',')}]`);
+            log('巡田', `可收获: ${result.harvestable.length} [${result.harvestable.map(h => h.id).join(',')}]`);
             log('巡田', `生长中: ${result.growing.length} [${result.growing.join(',')}]`);
             log('巡田', `缺水:   ${result.needWater.length} [${result.needWater.join(',')}]`);
             log('巡田', `有草:   ${result.needWeed.length} [${result.needWeed.join(',')}]`);
@@ -495,7 +482,7 @@ function createFarm(deps) {
             isFirstFarmCheck = false;
 
             const statusParts = [];
-            if (status.harvestable.length) statusParts.push(`可收获:${status.harvestable.length}(${status.harvestable.join(',')})`);
+            if (status.harvestable.length) statusParts.push(`可收获:${status.harvestable.length}(${status.harvestable.map(h => h.id).join(',')})`);
             if (status.needWater.length) statusParts.push(`缺水:${status.needWater.length}(${status.needWater.join(',')})`);
             if (status.needWeed.length) statusParts.push(`有草:${status.needWeed.length}(${status.needWeed.join(',')})`);
             if (status.needBug.length) statusParts.push(`有虫:${status.needBug.length}(${status.needBug.join(',')})`);
@@ -523,10 +510,18 @@ function createFarm(deps) {
 
             let harvestedLandIds = [];
             if (status.harvestable.length > 0) {
+                const harvestIds = status.harvestable.map(h => h.id);
                 try {
-                    await harvest(status.harvestable);
-                    log('收获', `已收获 ${status.harvestable.length} 块地 (${status.harvestable.join(',')})`);
-                    harvestedLandIds = [...status.harvestable];
+                    await harvest(harvestIds);
+                    log('收获', `已收获 ${status.harvestable.length} 块地 (${harvestIds.join(',')})`);
+                    harvestedLandIds = [...harvestIds];
+                    // 统计作物名称
+                    const cropCounts = {};
+                    for (const h of status.harvestable) {
+                        cropCounts[h.name] = (cropCounts[h.name] || 0) + 1;
+                    }
+                    const cropSummary = Object.entries(cropCounts).map(([name, cnt]) => `${name}x${cnt}`).join(' ');
+                    if (notify) notify(`🌾 收获 ${status.harvestable.length} 块地\n${cropSummary}`);
                 } catch (e) { logWarn('收获', e.message); }
                 await sleep(500);
             }
@@ -535,7 +530,15 @@ function createFarm(deps) {
             const allEmptyLands = [...status.empty];
             if (allDeadLands.length > 0 || allEmptyLands.length > 0) {
                 try { await autoPlantEmptyLands(allDeadLands, allEmptyLands); } catch (e) { logWarn('自动种植', e.message); }
+                organicFertDepleted = false; // 新种植后重置有机肥耗尽标记
                 await sleep(500);
+            }
+
+            if (status.growing.length > 0 && !organicFertDepleted) {
+                const fertilized = await fertilizeOrganic(status.growing, CONFIG.organicFertilizerId);
+                if (fertilized > 0) {
+                    log('施肥', `已对 ${fertilized}/${status.growing.length} 块地施有机肥`);
+                }
             }
 
             const actionCount = status.needWeed.length + status.needBug.length
